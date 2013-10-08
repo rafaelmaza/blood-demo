@@ -1,0 +1,277 @@
+<?php
+
+define('API_BASE_URL', 'http://demo02.localhost/api/public/v1');
+
+function blood_menu() {
+    $items['demand/new'] = array(
+        'title' => 'Submit a demand',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('blood_demand_new'),
+        'access arguments' => array('add demand'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['donation/new'] = array(
+        'title' => 'Report a donation',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('blood_donation_new'),
+        'access arguments' => array('add donation'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    return $items;
+}
+
+function blood_permission() {
+    return array(
+        'add demand' => array(
+            'title' => 'Submit a demand',
+            'description' => 'Register a new demand of donation',
+        ),
+        'add donation' => array(
+            'title' => 'Report a donation',
+            'description' => 'Register a new donation for the logged in user',
+        ),
+    );
+}
+
+function blood_demand_new($form, &$form_state) {
+    $form['title'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Title'),
+        '#size' => 60,
+        '#maxlength' => 200,
+        '#required' => true,
+        '#default_value' => isset($_GET['title']) ? $_GET['title'] : '',
+    );
+    $form['blood_type'] = array(
+        '#type' => 'select',
+        '#title' => t('Blood group'),
+        '#required' => true,
+        '#options' => array(
+            'A+' => 'A+',
+            'B+' => 'B+',
+            'AB+' => 'AB+',
+            'O+' => 'O+',
+            'A-' => 'A-',
+            'B-' => 'B-',
+            'AB-' => 'AB-',
+            'O-' => 'O-',
+        ),
+    );
+    $form['description'] = array(
+        '#type' => 'textarea',
+        '#title' => t('Details'),
+        '#cols' => 20,
+        '#rows' => 3,
+        '#required' => false,
+        '#default_value' => isset($_GET['description']) ? $_GET['description'] : '',
+    );
+
+    $locations_db = db_query("SELECT location.*, city.name AS city_name, city.state
+                           FROM location
+                           JOIN city ON (location.city_id = city.id)
+                           JOIN demand_location ON (location.id = demand_location.location_id)
+                           ORDER BY city.state, city.name");
+    $locations = array();
+    foreach($locations_db as $location) {
+        $locations[$location->id] = "{$location->name} ({$location->city_name} / {$location->state})";
+    }
+
+    $form['locations'] = array(
+        '#type' => 'checkboxes',
+        '#title' => t('Donation locations'),
+        '#required' => true,
+        '#options' => $locations,
+    );
+
+    $form['actions'] = array('#type' => 'actions');
+    $form['actions']['submit'] = array('#type' => 'submit', '#value' => t('Submit demand'));
+
+    return $form;
+}
+
+function blood_demand_new_submit($form, &$form_state) {
+    $response = drupal_http_request(API_BASE_URL . '/demand', array(
+       'method' => 'POST',
+       'headers' => array('Content-Type' => 'application/x-www-form-urlencoded'),
+       'data' => http_build_query(array(
+           'title' => $form_state['values']['title'],
+           'blood_type' => $form_state['values']['blood_type'],
+           'details' => $form_state['values']['description'],
+           'locations' => $form_state['values']['locations'],
+       )),
+    ));
+
+    if($response->code != 200) {
+        drupal_set_message(json_decode($response->data), 'error');
+        return;
+    }
+
+    drupal_set_message('Your demand was successfully registered!');
+    drupal_goto(); //send user to home page
+}
+
+function blood_donation_new($form, &$form_state) {
+    $form['date'] = array(
+        '#type' => 'date',
+        '#title' => t('Date'),
+        '#required' => true,
+    );
+
+    $locations_db = db_query("SELECT location.*, city.name AS city_name, city.state
+                           FROM location
+                           JOIN city ON (location.city_id = city.id)
+                           JOIN demand_location ON (location.id = demand_location.location_id)
+                           ORDER BY city.state, city.name");
+    $locations = array();
+    foreach($locations_db as $location) {
+        $locations[$location->id] = "{$location->name} ({$location->city_name} / {$location->state})";
+    }
+
+    $form['location'] = array(
+        '#type' => 'select',
+        '#title' => t('Location'),
+        '#required' => true,
+        '#options' => $locations,
+    );
+
+    $demands_db = db_query("SELECT * FROM demand ORDER BY date_entered DESC");
+
+    $demands = array();
+    foreach($demands_db as $demand) {
+        $demands[$demand->id] = $demand->title;
+    }
+
+    $form['demand'] = array(
+        '#type' => 'select',
+        '#title' => t('Demand'),
+        '#required' => true,
+        '#options' => $demands,
+    );
+
+    $form['actions'] = array('#type' => 'actions');
+    $form['actions']['submit'] = array('#type' => 'submit', '#value' => t('Report donation'));
+
+    return $form;
+}
+
+function blood_block_info() {
+    $blocks['recent_demands'] = array(
+        'info' => t('Latest demands'),
+    );
+
+    return $blocks;
+}
+
+function blood_block_view($delta = '') {
+    $block = array();
+
+    switch ($delta) {
+        case 'recent_demands':
+            $block['subject'] = t('Latest demands');
+            $block['content'] = "<ul id=\"last-demands\">";
+            $demands = db_query("SELECT * FROM demand ORDER BY date_entered DESC LIMIT 3");
+            foreach($demands as $demand) {
+                $block['content'] .= "
+                    <li>
+                        <strong>{$demand->title}</strong><br />
+                        Blood group: {$demand->blood_type}<br />
+                        Where to donate:
+                        <ul>";
+
+                $locations = db_query("SELECT location.*, city.name AS city_name, city.state
+                                       FROM location
+                                       JOIN city ON (location.city_id = city.id)
+                                       JOIN demand_location ON (location.id = demand_location.location_id)
+                                       WHERE demand_location.demand_id = :id",
+                    array('id' => $demand->id));
+                foreach($locations as $location) {
+                    $block['content'] .= "
+                            <li>
+                            <strong>{$location->name}</strong><br />
+                            Address: {$location->address}<br />
+                            {$location->city_name} / {$location->state}<br />
+                            Opening hours: {$location->hours}
+                            </li>";
+                }
+
+                $block['content'] .= "
+                        </ul>
+                    </li>
+                ";
+            }
+            $block['content'] .= "</ul>";
+            break;
+    }
+    return $block;
+}
+
+function blood_form_user_register_form_alter(&$form, &$form_state, $form_id){
+    $city_db = db_query("SELECT *
+                           FROM city
+                           ORDER BY state, name");
+    $cities = array();
+    foreach($city_db as $city) {
+        $cities[$city->id] = "{$city->name} / {$city->state}";
+    }
+    $form['field_city_state']['und']['#options'] = $cities;
+    $form['#validate'][] = 'blood_form_user_register_validate';
+}
+
+function blood_form_user_profile_form_alter(&$form, &$form_state, $form_id){
+    $city_db = db_query("SELECT *
+                           FROM city
+                           ORDER BY state, name");
+    $cities = array();
+    foreach($city_db as $city) {
+        $cities[$city->id] = "{$city->name} / {$city->state}";
+    }
+    $form['field_city_state']['und']['#options'] = $cities;
+}
+
+function blood_form_user_register_validate(&$form, &$form_state) {
+    if(!in_array($form_state['values']['field_blood_type']['und'][0]['value'], array('A+','B+','AB+','O+','A-','B-','AB-','O-'))) {
+        form_set_error('field_blood_type', 'Invalid blood type');
+    }
+
+    $city = db_query("SELECT *
+                      FROM city
+                      WHERE id = :id", array(
+        'id' => $form_state['values']['field_city_state']['und'][0]['value']
+    ))->rowCount();
+
+    if($city != 1) {
+        form_set_error('field_city_state', 'Invalid city/state');
+    }
+}
+
+function blood_page_alter(&$page) {
+    if(isset($page['content']['system_main']['field_city_state'][0]['#markup'])) {
+        $city = db_query("SELECT *
+                          FROM city
+                          WHERE id = :id", array(
+			'id' => $page['content']['system_main']['field_city_state'][0]['#markup']
+		))->fetchObject();
+		
+        $page['content']['system_main']['field_city_state'][0]['#markup'] = $city->name.'/'.$city->state;
+    }
+}
+
+function blood_user_insert(&$edit, $account, $category) {
+    $response = drupal_http_request(API_BASE_URL . '/donor', array(
+        'method' => 'POST',
+        'headers' => array('Content-Type' => 'application/x-www-form-urlencoded'),
+        'data' => http_build_query(array(
+            'name' => $edit['name'],
+            'email' => $edit['mail'],
+            'blood_type' => $edit['field_blood_type']['und'][0]['value'],
+            'city' => $edit['field_city_state']['und'][0]['value'],
+            'address' => $edit['field_address']['und'][0]['value'],
+            'zip' => $edit['field_zip_code']['und'][0]['value'],
+        )),
+    ));
+
+    if($response->code != 200) {
+        drupal_set_message(json_decode($response->data), 'error');
+        return false;
+    }
+}
